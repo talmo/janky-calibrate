@@ -12,7 +12,6 @@ from PyQt5.QtWidgets import (
     QPushButton,
     QSlider,
     QLabel,
-    QListWidget,
     QDockWidget,
     QTreeWidget,
     QTreeWidgetItem,
@@ -31,6 +30,143 @@ import cv2
 from scipy.optimize import least_squares
 
 
+@attrs.define(eq=False)
+class CorrespondingPointSet:
+    """Container for a set of corresponding points at a given frame index across any number of videos."""
+
+    frame_idx: int
+    video_points: dict[sio.Video, list[tuple[float, float]]] = attrs.field(factory=dict)
+    name: str = ""
+
+    def __getitem__(self, video: sio.Video):
+        return self.video_points[video]
+
+    def __setitem__(self, video: sio.Video, point: list[tuple[float, float]]):
+        self.video_points[video] = point
+
+    def __contains__(self, video: sio.Video):
+        return video in self.video_points
+
+
+def robust_cost_function(
+    params, n_cameras, n_points, camera_indices, point_indices, points_2d, camera_matrix
+):
+    camera_params = params[: n_cameras * 9].reshape((n_cameras, 9))
+    points_3d = params[n_cameras * 9 :].reshape((n_points, 3))
+
+    errors = []
+    for i in range(len(points_2d)):
+        camera_idx = camera_indices[i]
+        point_idx = point_indices[i]
+        point_3d = points_3d[point_idx]
+        camera_param = camera_params[camera_idx]
+
+        projected_point = project_point(
+            point_3d, camera_matrix, camera_param[:3], camera_param[3:6]
+        )
+        error = np.linalg.norm(points_2d[i] - projected_point)
+        errors.append(error)
+
+    return huber_loss(np.array(errors), delta=1.0)
+
+
+def huber_loss(errors, delta):
+    abs_errors = np.abs(errors)
+    quadratic = np.minimum(abs_errors, delta)
+    linear = abs_errors - quadratic
+    return 0.5 * quadratic**2 + delta * linear
+
+
+def initialize_cameras(n_cameras):
+    # Initialize camera parameters: [fx, fy, cx, cy, k1, k2, p1, p2, k3]
+    return np.hstack([np.ones((n_cameras, 4)), np.zeros((n_cameras, 5))])
+
+
+def initialize_3d_points(n_points):
+    # Random initial guess for 3D points
+    return np.random.rand(n_points, 3)
+
+
+def bundle_adjust_self_calibration(
+    points_2d, camera_indices, point_indices, camera_matrix
+):
+    # Initialize parameters
+    n_cameras = len(np.unique(camera_indices))
+    n_points = len(np.unique(point_indices))
+    camera_params = initialize_cameras(n_cameras)
+    points_3d = initialize_3d_points(n_points)
+
+    # Define optimization parameters
+    x0 = np.hstack((camera_params.ravel(), points_3d.ravel()))
+
+    # Optimize
+    res = least_squares(
+        robust_cost_function,
+        x0,
+        args=(
+            n_cameras,
+            n_points,
+            camera_indices,
+            point_indices,
+            points_2d,
+            camera_matrix,
+        ),
+        method="trf",
+        ftol=1e-4,
+        xtol=1e-4,
+        max_nfev=200,
+    )
+
+    # Extract results
+    camera_params = res.x[: n_cameras * 9].reshape((n_cameras, 9))
+    points_3d = res.x[n_cameras * 9 :].reshape((n_points, 3))
+
+    return camera_params, points_3d
+
+
+def project_point(point_3d, camera_matrix, rvec, tvec):
+    """Projects a single 3D point to 2D using the camera matrix, rotation vector, and translation vector."""
+    point_2d, _ = cv2.projectPoints(
+        np.array([point_3d]), rvec, tvec, camera_matrix, distCoeffs=None
+    )
+    return point_2d.reshape(2)
+
+
+def estimate_initial_intrinsics(all_points1, all_points2, image_size):
+    """
+    Estimates the initial camera intrinsics using self-calibration via bundle adjustment.
+
+    Parameters:
+    all_points1 (np.ndarray): First set of points.
+    all_points2 (np.ndarray): Second set of points.
+    image_size (tuple): Size of the image (width, height).
+
+    Returns:
+    camera_matrix (np.ndarray): The estimated camera matrix.
+    """
+    points_2d = np.vstack((all_points1, all_points2))
+    camera_indices = np.hstack(
+        (np.zeros(len(all_points1)), np.ones(len(all_points2)))
+    ).astype(int)
+    point_indices = np.arange(len(points_2d)).astype(int)
+
+    # Initial camera matrix guess
+    camera_matrix = np.array(
+        [[1, 0, image_size[0] / 2], [0, 1, image_size[1] / 2], [0, 0, 1]],
+        dtype=np.float32,
+    )
+
+    camera_params, _ = bundle_adjust_self_calibration(
+        points_2d, camera_indices, point_indices, camera_matrix
+    )
+
+    # Extract the camera matrix from the first camera's parameters
+    fx, fy, cx, cy = camera_params[0, :4]
+    camera_matrix = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=np.float32)
+
+    return camera_matrix
+
+
 def project(points_3d, camera_matrix, rvec, tvec):
     """Projects 3D points to 2D using the camera matrix, rotation vector, and translation vector."""
     points_2d, _ = cv2.projectPoints(
@@ -43,38 +179,54 @@ def reprojection_error(
     params, n_cameras, n_points, camera_indices, point_indices, points_2d, camera_matrix
 ):
     """Computes the reprojection error."""
-    rvecs = params[: n_cameras * 3].reshape((n_cameras, 3))
-    tvecs = params[n_cameras * 3 : n_cameras * 6].reshape((n_cameras, 3))
-    points_3d = params[n_cameras * 6 :].reshape((n_points, 3))
+    camera_params = params[: n_cameras * 9].reshape((n_cameras, 9))
+    points_3d = params[n_cameras * 9 :].reshape((n_points, 3))
 
-    error = []
+    errors = []
     for i in range(points_2d.shape[0]):
-        camera_idx = camera_indices[i]
-        point_idx = point_indices[i]
-        projected_point = project(
-            points_3d[point_idx], camera_matrix, rvecs[camera_idx], tvecs[camera_idx]
-        )
-        error.append(points_2d[i] - projected_point)
-    return np.concatenate(error)
+        camera_idx = int(camera_indices[i])
+        point_idx = int(point_indices[i])
+        camera_param = camera_params[camera_idx]
+        rvec = camera_param[:3]
+        tvec = camera_param[3:6]
+        projected_point = project_point(points_3d[point_idx], camera_matrix, rvec, tvec)
+        errors.append(np.linalg.norm(points_2d[i] - projected_point))
+    return np.array(errors)
 
 
-def bundle_adjustment(corresponding_points, camera_matrix):
+def bundle_adjustment(corresponding_points: list[CorrespondingPointSet]):
     """Performs bundle adjustment using CorrespondingPointSet."""
+    image_size = None
     points_2d = []
     camera_indices = []
     point_indices = []
     point_set_map = {}
     point_counter = 0
 
+    videos = []
     for point_set in corresponding_points:
+        for video in point_set.video_points.keys():
+            if video not in videos:
+                videos.append(video)
+            if image_size is None:
+                image_size = (video.shape[2], video.shape[1])
+
+    for point_set_idx, point_set in enumerate(corresponding_points):
+        print("point_set_idx:", point_set_idx)
+        print("point_set.frame_idx:", point_set.frame_idx)
         for video, point in point_set.video_points.items():
-            video_idx = corresponding_points[0].video_points.keys().index(video)
-            if (point_set.frame_idx, video_idx) not in point_set_map:
-                point_set_map[(point_set.frame_idx, video_idx)] = point_counter
+            video_idx = videos.index(video)
+            print("video_idx:", video_idx)
+            if (point_set_idx, video_idx) not in point_set_map:
+                point_set_map[(point_set_idx, video_idx)] = point_counter
                 point_counter += 1
             points_2d.append(point)
             camera_indices.append(video_idx)
             point_indices.append(point_set_map[(point_set.frame_idx, video_idx)])
+
+    print("point_set_map:", point_set_map)
+    print("points_2d:", points_2d)
+    print("point_counter:", point_counter)
 
     points_2d = np.array(points_2d, dtype=np.float32)
     camera_indices = np.array(camera_indices, dtype=np.int32)
@@ -82,19 +234,25 @@ def bundle_adjustment(corresponding_points, camera_matrix):
     n_cameras = len(corresponding_points[0].video_points)
     n_points = len(point_set_map)
 
+    # Estimate initial camera matrix
+    camera_matrix = estimate_initial_intrinsics(
+        points_2d[camera_indices == 0], points_2d[camera_indices == 1], image_size
+    )
+
     # Initial estimates
-    rvecs = np.zeros((n_cameras, 3))
-    tvecs = np.zeros((n_cameras, 3))
+    camera_params = np.zeros((n_cameras, 9))  # [fx, fy, cx, cy, k1, k2, p1, p2, k3]
+    camera_params[:, :4] = camera_matrix[:2, :2].ravel()  # Set fx, fy, cx, cy
     points_3d = np.random.rand(n_points, 3)  # Random initial guess for 3D points
 
-    x0 = np.hstack((rvecs.ravel(), tvecs.ravel(), points_3d.ravel()))
+    # Correctly initialize x0 with the appropriate size
+    x0 = np.hstack((camera_params.ravel(), points_3d.ravel()))
 
     res = least_squares(
         reprojection_error,
         x0,
         verbose=2,
         x_scale="jac",
-        ftol=1e-4,
+        ftol=1e-6,
         method="trf",
         args=(
             n_cameras,
@@ -107,11 +265,15 @@ def bundle_adjustment(corresponding_points, camera_matrix):
     )
 
     optimized_params = res.x
-    rvecs = optimized_params[: n_cameras * 3].reshape((n_cameras, 3))
-    tvecs = optimized_params[n_cameras * 3 : n_cameras * 6].reshape((n_cameras, 3))
-    points_3d = optimized_params[n_cameras * 6 :].reshape((n_points, 3))
+    camera_params = optimized_params[: n_cameras * 9].reshape((n_cameras, 9))
+    points_3d = optimized_params[n_cameras * 9 :].reshape((n_points, 3))
+    reproj_err = res.cost
 
-    return rvecs, tvecs, points_3d
+    # Extract rvecs and tvecs from camera_params
+    rvecs = camera_params[:, :3]
+    tvecs = camera_params[:, 3:6]
+
+    return camera_matrix, rvecs, tvecs, points_3d, reproj_err
 
 
 class VideoPlayer(QWidget):
@@ -206,24 +368,6 @@ class VideoPlayer(QWidget):
         self.seek_frame(self.current_frame - 1)
 
 
-@attrs.define(eq=False)
-class CorrespondingPointSet:
-    """Container for a set of corresponding points at a given frame index across any number of videos."""
-
-    frame_idx: int
-    video_points: dict[sio.Video, list[tuple[float, float]]] = attrs.field(factory=dict)
-    name: str = ""
-
-    def __getitem__(self, video: sio.Video):
-        return self.video_points[video]
-
-    def __setitem__(self, video: sio.Video, point: list[tuple[float, float]]):
-        self.video_points[video] = point
-
-    def __contains__(self, video: sio.Video):
-        return video in self.video_points
-
-
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -256,6 +400,11 @@ class MainWindow(QMainWindow):
             self.on_tree_selection_changed
         )
         self.dock_layout.addWidget(self.correspondence_tree)
+
+        # Add a button to run bundle adjustment
+        self.bundle_adjust_button = QPushButton("Bundle Adjust")
+        self.bundle_adjust_button.clicked.connect(self.bundle_adjust)
+        self.dock_layout.addWidget(self.bundle_adjust_button)
 
         self.addDockWidget(Qt.RightDockWidgetArea, self.dock_widget)
 
@@ -321,6 +470,57 @@ class MainWindow(QMainWindow):
         # Add keyboard shortcuts for zooming
         QShortcut(QKeySequence("W"), self, self.zoom_in)
         QShortcut(QKeySequence("S"), self, self.zoom_out)
+
+        # press space to print all correspondences
+        QShortcut(QKeySequence("Space"), self, self.print_correspondences)
+        QShortcut(QKeySequence("B"), self, self.bundle_adjust)
+
+        # Initialize correspondences
+        self.add_correspondence(self.video1, (236.521540885339, 425.7391152951992))
+        self.add_correspondence(self.video2, (134.35598918342333, 650.816317395286))
+
+        self.add_correspondence(self.video1, (341.147725498134, 323.338944396721))
+        self.add_correspondence(self.video2, (141.04605425502163, 447.8890229198987))
+
+        self.add_correspondence(self.video1, (619.4085950633514, 980.0346576058048))
+        self.add_correspondence(self.video2, (876.934596403741, 900.5727245981037))
+
+        self.add_correspondence(self.video1, (922.1564699784445, 441.3216385416123))
+        self.add_correspondence(self.video2, (888.0841962299814, 249.42193458603253))
+
+        self.add_correspondence(self.video1, (321.89448604452275, 500.9786351868236))
+        self.add_correspondence(self.video2, (260.90631232412153, 610.3258292259762))
+
+        self.add_correspondence(self.video1, (377.93392811630446, 441.5770096962475))
+        self.add_correspondence(self.video2, (270.8303259206595, 497.85192545698294))
+
+        self.add_correspondence(self.video1, (341.50844335757336, 573.8294826339442))
+        self.add_correspondence(self.video2, (297.8463235727128, 638.4442441330538))
+
+        self.add_correspondence(self.video1, (432.8524592763089, 474.0797029923685))
+        self.add_correspondence(self.video2, (299.5003767014448, 467.5281877584905))
+
+        self.add_correspondence(self.video1, (635.5191335723719, 904.1674520176534))
+        self.add_correspondence(self.video2, (780.6867096869253, 759.0914896944737))
+
+        self.add_correspondence(self.video1, (710.1291367123453, 840.2162648955023))
+        self.add_correspondence(self.video2, (814.3527943737017, 673.0924457532038))
+
+        self.add_correspondence(self.video1, (635.5191335723719, 904.1674520176534))
+        self.add_correspondence(self.video2, (780.6867096869253, 759.0914896944737))
+
+        self.add_correspondence(self.video1, (710.1291367123453, 840.2162648955023))
+        self.add_correspondence(self.video2, (814.3527943737017, 673.0924457532038))
+
+        self.add_correspondence(self.video1, (546.0281454391826, 613.0882810564711))
+        self.add_correspondence(self.video2, (543.3560256614746, 552.7603858138051))
+
+        self.add_correspondence(self.video1, (836.5793621729284, 571.0914448717701))
+        self.add_correspondence(self.video2, (786.8234909352043, 334.2429997308254))
+
+    def print_correspondences(self):
+        for point_set in self.correspondences:
+            print(point_set.video_points)
 
     def zoom_in(self):
         self.video1.pan_zoom_controller.zoom(0.5, rect=self.video1.renderer.rect)
@@ -474,6 +674,25 @@ class MainWindow(QMainWindow):
             # elif video == self.video2.video:
             #     self.video2.highlight_point(point)
             pass
+
+    def bundle_adjust(self):
+        print("len(self.correspondences):", len(self.correspondences))
+        camera_matrix, rvecs, tvecs, points_3d, reprojection_error = bundle_adjustment(
+            self.correspondences
+        )
+        print("Camera matrix:")
+        print(camera_matrix)
+        print()
+        print("Rotation vectors:")
+        print(rvecs)
+        print()
+        print("Translation vectors:")
+        print(tvecs)
+        print()
+        print("3D points:")
+        print(points_3d)
+        print()
+        print("Reprojection error:", reprojection_error)
 
 
 if __name__ == "__main__":
