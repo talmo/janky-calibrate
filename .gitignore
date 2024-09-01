@@ -1,0 +1,21 @@
+# Standard python git ignore
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+*.pyx
+*.pxd
+*.pxi
+
+# pycache
+__pycache__
+
+# build
+build/
+dist/
+*.egg-info/
+*.egg/
+*.dist-info/
+*.whl
+
+.DS_Store

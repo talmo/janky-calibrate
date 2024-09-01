@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "janky-calibrate"
+version = "0.1.0"
+description = "A multicamera calibration app using PyQt and OpenGL"
+authors = [{ name = "Your Name", email = "your.email@example.com" }]
+license = { file = "LICENSE" }
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "opencv-python-headless",
+    "numpy",
+    "PyQt5",
+    "PyOpenGL",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[tool.setuptools.packages.find]
+where = ["janky_calibrate"]
