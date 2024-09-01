@@ -3,7 +3,21 @@ Displays two videos side by side, allowing the user to calibrate the camera.
 """
 
 import sys
-from PyQt5.QtWidgets import QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QPushButton, QSlider, QLabel, QListWidget, QDockWidget, QTreeWidget, QTreeWidgetItem, QHeaderView
+from PyQt5.QtWidgets import (
+    QApplication,
+    QMainWindow,
+    QWidget,
+    QHBoxLayout,
+    QVBoxLayout,
+    QPushButton,
+    QSlider,
+    QLabel,
+    QListWidget,
+    QDockWidget,
+    QTreeWidget,
+    QTreeWidgetItem,
+    QHeaderView,
+)
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QKeySequence
 from PyQt5.QtWidgets import QShortcut
@@ -19,22 +33,30 @@ from scipy.optimize import least_squares
 
 def project(points_3d, camera_matrix, rvec, tvec):
     """Projects 3D points to 2D using the camera matrix, rotation vector, and translation vector."""
-    points_2d, _ = cv2.projectPoints(points_3d, rvec, tvec, camera_matrix, distCoeffs=None)
+    points_2d, _ = cv2.projectPoints(
+        points_3d, rvec, tvec, camera_matrix, distCoeffs=None
+    )
     return points_2d.reshape(-1, 2)
 
-def reprojection_error(params, n_cameras, n_points, camera_indices, point_indices, points_2d, camera_matrix):
+
+def reprojection_error(
+    params, n_cameras, n_points, camera_indices, point_indices, points_2d, camera_matrix
+):
     """Computes the reprojection error."""
-    rvecs = params[:n_cameras * 3].reshape((n_cameras, 3))
-    tvecs = params[n_cameras * 3:n_cameras * 6].reshape((n_cameras, 3))
-    points_3d = params[n_cameras * 6:].reshape((n_points, 3))
+    rvecs = params[: n_cameras * 3].reshape((n_cameras, 3))
+    tvecs = params[n_cameras * 3 : n_cameras * 6].reshape((n_cameras, 3))
+    points_3d = params[n_cameras * 6 :].reshape((n_points, 3))
 
     error = []
     for i in range(points_2d.shape[0]):
         camera_idx = camera_indices[i]
         point_idx = point_indices[i]
-        projected_point = project(points_3d[point_idx], camera_matrix, rvecs[camera_idx], tvecs[camera_idx])
+        projected_point = project(
+            points_3d[point_idx], camera_matrix, rvecs[camera_idx], tvecs[camera_idx]
+        )
         error.append(points_2d[i] - projected_point)
     return np.concatenate(error)
+
 
 def bundle_adjustment(corresponding_points, camera_matrix):
     """Performs bundle adjustment using CorrespondingPointSet."""
@@ -68,14 +90,26 @@ def bundle_adjustment(corresponding_points, camera_matrix):
     x0 = np.hstack((rvecs.ravel(), tvecs.ravel(), points_3d.ravel()))
 
     res = least_squares(
-        reprojection_error, x0, verbose=2, x_scale='jac', ftol=1e-4, method='trf',
-        args=(n_cameras, n_points, camera_indices, point_indices, points_2d, camera_matrix)
+        reprojection_error,
+        x0,
+        verbose=2,
+        x_scale="jac",
+        ftol=1e-4,
+        method="trf",
+        args=(
+            n_cameras,
+            n_points,
+            camera_indices,
+            point_indices,
+            points_2d,
+            camera_matrix,
+        ),
     )
 
     optimized_params = res.x
-    rvecs = optimized_params[:n_cameras * 3].reshape((n_cameras, 3))
-    tvecs = optimized_params[n_cameras * 3:n_cameras * 6].reshape((n_cameras, 3))
-    points_3d = optimized_params[n_cameras * 6:].reshape((n_points, 3))
+    rvecs = optimized_params[: n_cameras * 3].reshape((n_cameras, 3))
+    tvecs = optimized_params[n_cameras * 3 : n_cameras * 6].reshape((n_cameras, 3))
+    points_3d = optimized_params[n_cameras * 6 :].reshape((n_points, 3))
 
     return rvecs, tvecs, points_3d
 
@@ -89,20 +123,20 @@ class VideoPlayer(QWidget):
         self.frame = self.video[self.current_frame]
         self.image_height, self.image_width, self.image_channels = self.frame.shape
         self.points = []
-        
+
         layout = QVBoxLayout()
         self.canvas = WgpuCanvas(size=(self.image_width, self.image_height))
         layout.addWidget(self.canvas)
-        
+
         self.setLayout(layout)
-        
+
         self.renderer = gfx.renderers.WgpuRenderer(self.canvas)
         self.scene = gfx.Scene()
-        
+
         self.image_texture = gfx.Texture(self.frame, dim=2)
         self.image = gfx.Image(
             gfx.Geometry(grid=self.image_texture),
-            gfx.ImageBasicMaterial(clim=(0, 255), pick_write=True)
+            gfx.ImageBasicMaterial(clim=(0, 255), pick_write=True),
         )
         self.scene.add(self.image)
 
@@ -110,13 +144,15 @@ class VideoPlayer(QWidget):
         self.camera.local.position = (self.image_width / 2, self.image_height / 2, 0)
         self.camera.local.scale_y = -1
 
-        self.pan_zoom_controller = gfx.PanZoomController(self.camera, register_events=self.renderer)
+        self.pan_zoom_controller = gfx.PanZoomController(
+            self.camera, register_events=self.renderer
+        )
 
         self.renderer.add_event_handler(self.on_double_click, "double_click")
 
         # Set the initial frame
         self.seek_frame(self.current_frame)
-        
+
     def on_double_click(self, event: gfx.PointerEvent):
         if event.button == 1:
             if "index" in event.pick_info:
@@ -142,14 +178,18 @@ class VideoPlayer(QWidget):
                 for video, point in point_set.video_points.items():
                     if video == self.video:
                         pt = gfx.Points(
-                            geometry=gfx.Geometry(positions=np.array([[point[0], point[1], 1]], dtype=np.float32)),
+                            geometry=gfx.Geometry(
+                                positions=np.array(
+                                    [[point[0], point[1], 1]], dtype=np.float32
+                                )
+                            ),
                             material=gfx.PointsMarkerMaterial(
                                 marker="x",
                                 size=10,
                                 color=cmap(color_ind % len(cmap.colors)),
                                 edge_width=0.5,
-                                edge_color="white"
-                            )
+                                edge_color="white",
+                            ),
                         )
                         self.points.append(pt)
                         self.scene.add(pt)
@@ -169,6 +209,7 @@ class VideoPlayer(QWidget):
 @attrs.define(eq=False)
 class CorrespondingPointSet:
     """Container for a set of corresponding points at a given frame index across any number of videos."""
+
     frame_idx: int
     video_points: dict[sio.Video, list[tuple[float, float]]] = attrs.field(factory=dict)
     name: str = ""
@@ -181,21 +222,20 @@ class CorrespondingPointSet:
 
     def __contains__(self, video: sio.Video):
         return video in self.video_points
-    
 
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Janky Calibrate")
-        
+
         self.video_paths = [
             "tests/data/minimal_session/mid/minimal_mid.mp4",
-            "tests/data/minimal_session/top/minimal_top.mp4"
+            "tests/data/minimal_session/top/minimal_top.mp4",
         ]
         self.videos = [sio.load_video(path) for path in self.video_paths]
         self.correspondences: list[CorrespondingPointSet] = []
-        
+
         central_widget = QWidget()
         layout = QVBoxLayout()
 
@@ -205,16 +245,18 @@ class MainWindow(QMainWindow):
         self.dock_layout = QVBoxLayout()
         dock_contents.setLayout(self.dock_layout)
         self.dock_widget.setWidget(dock_contents)
-        
+
         self.correspondence_tree = QTreeWidget()
         self.correspondence_tree.setHeaderLabels(["Video", "Point"])
         header = self.correspondence_tree.header()
         header.setSectionResizeMode(QHeaderView.ResizeToContents)
         header.setStretchLastSection(False)
         header.setSectionResizeMode(1, QHeaderView.Stretch)
-        self.correspondence_tree.itemSelectionChanged.connect(self.on_tree_selection_changed)
+        self.correspondence_tree.itemSelectionChanged.connect(
+            self.on_tree_selection_changed
+        )
         self.dock_layout.addWidget(self.correspondence_tree)
-        
+
         self.addDockWidget(Qt.RightDockWidgetArea, self.dock_widget)
 
         video_layout = QHBoxLayout()
@@ -225,7 +267,7 @@ class MainWindow(QMainWindow):
 
         self._frame_idx = 0
         self.n_frames = len(self.videos[0])
-        
+
         layout.addLayout(video_layout)
 
         # Horizontal layout for buttons
@@ -252,7 +294,7 @@ class MainWindow(QMainWindow):
         self.next_button = QPushButton("Next Frame")
         self.next_button.clicked.connect(self.next_frame)
         button_layout.addWidget(self.next_button)
-        
+
         layout.addLayout(button_layout)
         central_widget.setLayout(layout)
         self.setCentralWidget(central_widget)
@@ -264,8 +306,16 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("Left"), self, self.prev_frame)
         QShortcut(QKeySequence("Right"), self, self.next_frame)
         # Shift + right/left to skip 10 frames
-        QShortcut(QKeySequence("Shift+Right"), self, lambda: self.seek_frame(self.frame_idx + 10))
-        QShortcut(QKeySequence("Shift+Left"), self, lambda: self.seek_frame(self.frame_idx - 10))
+        QShortcut(
+            QKeySequence("Shift+Right"),
+            self,
+            lambda: self.seek_frame(self.frame_idx + 10),
+        )
+        QShortcut(
+            QKeySequence("Shift+Left"),
+            self,
+            lambda: self.seek_frame(self.frame_idx - 10),
+        )
         QShortcut(QKeySequence("Q"), self, self.close)
 
         # Add keyboard shortcuts for zooming
@@ -287,23 +337,25 @@ class MainWindow(QMainWindow):
     def adjust_layout(self):
         # Get the width of the window
         window_width = 1500
-        
+
         # Calculate the height based on the aspect ratio of both videos
         video1_aspect_ratio = self.video1.image_width / self.video1.image_height
         video2_aspect_ratio = self.video2.image_width / self.video2.image_height
-        
+
         # Use the larger aspect ratio to ensure both videos fit
         max_aspect_ratio = max(video1_aspect_ratio, video2_aspect_ratio)
-        
+
         # Calculate the height based on the maximum aspect ratio
-        video_height = window_width / (2 * max_aspect_ratio)  # Divide by 2 since we have two videos side by side
+        video_height = window_width / (
+            2 * max_aspect_ratio
+        )  # Divide by 2 since we have two videos side by side
 
         # Account for the dock widget
         window_width += self.dock_widget.width()
-        
+
         # Set the size of the window
         self.resize(int(window_width), int(video_height))
-        
+
         # Adjust the layout to fit the new size
         self.layout().activate()
 
@@ -339,7 +391,9 @@ class MainWindow(QMainWindow):
         selected_items = self.correspondence_tree.selectedItems()
         if not selected_items:
             # No point set selected, create a new one
-            point_set = CorrespondingPointSet(frame_idx, name=f"Point set: {len(self.correspondences)}")
+            point_set = CorrespondingPointSet(
+                frame_idx, name=f"Point set: {len(self.correspondences)}"
+            )
             point_set[video] = point
             self.correspondences.append(point_set)
             item = self.add_point_set_to_tree(point_set)
@@ -356,7 +410,9 @@ class MainWindow(QMainWindow):
 
             if video in point_set:
                 # Create a new point set if the video already has a point in the current set
-                point_set = CorrespondingPointSet(frame_idx, name=f"Point set: {len(self.correspondences)}")
+                point_set = CorrespondingPointSet(
+                    frame_idx, name=f"Point set: {len(self.correspondences)}"
+                )
                 point_set[video] = point
                 self.correspondences.append(point_set)
                 self.add_point_set_to_tree(point_set)
@@ -394,7 +450,7 @@ class MainWindow(QMainWindow):
                         if child.text(0) == f"Video: {video_ind}":
                             found_video = True
                             break
-                    
+
                     if not found_video:
                         child = QTreeWidgetItem([f"Video: {video_ind}", f"{point}"])
                         item.addChild(child)
@@ -419,9 +475,9 @@ class MainWindow(QMainWindow):
             #     self.video2.highlight_point(point)
             pass
 
+
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     window = MainWindow()
     window.show()
     sys.exit(app.exec_())
-
