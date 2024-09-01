@@ -200,6 +200,7 @@ def bundle_adjustment(corresponding_points: list[CorrespondingPointSet]):
     points_2d = []
     camera_indices = []
     point_indices = []
+    point_set_indices = []
     point_set_map = {}
     point_counter = 0
 
@@ -223,6 +224,7 @@ def bundle_adjustment(corresponding_points: list[CorrespondingPointSet]):
             points_2d.append(point)
             camera_indices.append(video_idx)
             point_indices.append(point_set_map[(point_set.frame_idx, video_idx)])
+            point_set_indices.append(point_set_idx)
 
     print("point_set_map:", point_set_map)
     print("points_2d:", points_2d)
@@ -231,6 +233,7 @@ def bundle_adjustment(corresponding_points: list[CorrespondingPointSet]):
     points_2d = np.array(points_2d, dtype=np.float32)
     camera_indices = np.array(camera_indices, dtype=np.int32)
     point_indices = np.array(point_indices, dtype=np.int32)
+    point_set_indices = np.array(point_set_indices, dtype=np.int32)
     n_cameras = len(corresponding_points[0].video_points)
     n_points = len(point_set_map)
 
@@ -273,7 +276,26 @@ def bundle_adjustment(corresponding_points: list[CorrespondingPointSet]):
     rvecs = camera_params[:, :3]
     tvecs = camera_params[:, 3:6]
 
-    return camera_matrix, rvecs, tvecs, points_3d, reproj_err
+    # Compute the reprojections
+    reprojected_point_sets = []
+    for i in range(points_2d.shape[0]):
+        camera_idx = int(camera_indices[i])
+        point_idx = int(point_indices[i])
+        point_set_idx = int(point_set_indices[i])
+        camera_param = camera_params[camera_idx]
+        rvec = camera_param[:3]
+        tvec = camera_param[3:6]
+        point_2d_reproj = project_point(points_3d[point_idx], camera_matrix, rvec, tvec)
+
+        # Create a new CorrespondingPointSet with the reprojected points
+        reprojected_point_set = CorrespondingPointSet(
+            frame_idx=corresponding_points[point_set_idx].frame_idx,
+            video_points={video: point_2d_reproj for video in videos},
+            name="Reprojected Points",
+        )
+        reprojected_point_sets.append(reprojected_point_set)
+
+    return camera_matrix, rvecs, tvecs, points_3d, reproj_err, reprojected_point_sets
 
 
 class VideoPlayer(QWidget):
@@ -677,9 +699,28 @@ class MainWindow(QMainWindow):
 
     def bundle_adjust(self):
         print("len(self.correspondences):", len(self.correspondences))
-        camera_matrix, rvecs, tvecs, points_3d, reprojection_error = bundle_adjustment(
-            self.correspondences
-        )
+        (
+            camera_matrix,
+            rvecs,
+            tvecs,
+            points_3d,
+            reprojection_error,
+            reprojected_point_sets,
+        ) = bundle_adjustment(self.correspondences)
+
+        euclidean_errors = []
+        for point_set, reprojected_point_set in zip(
+            self.correspondences, reprojected_point_sets
+        ):
+            for pt, reprojected_pt in zip(
+                point_set.video_points.values(),
+                reprojected_point_set.video_points.values(),
+            ):
+                euclidean_errors.append(
+                    np.linalg.norm(np.array(pt) - np.array(reprojected_pt))
+                )
+        euclidean_errors = np.array(euclidean_errors)
+
         print("Camera matrix:")
         print(camera_matrix)
         print()
@@ -693,6 +734,50 @@ class MainWindow(QMainWindow):
         print(points_3d)
         print()
         print("Reprojection error:", reprojection_error)
+        print()
+        print("Mean euclidean error:", np.mean(euclidean_errors))
+
+        # plot the reprojected points
+        print(len(reprojected_point_sets))
+        n_plotted = 0
+        for reprojected_point_set in reprojected_point_sets:
+            for video, point in reprojected_point_set.video_points.items():
+                if video == self.video1.video:
+                    self.video1.scene.add(
+                        gfx.Points(
+                            geometry=gfx.Geometry(
+                                positions=np.array(
+                                    [[point[0], point[1], 1]], dtype=np.float32
+                                )
+                            ),
+                            material=gfx.PointsMarkerMaterial(
+                                marker="+",
+                                size=10,
+                                color="red",
+                            ),
+                        )
+                    )
+                    self.video1.render()
+                    n_plotted += 1
+                elif video == self.video2.video:
+                    self.video2.scene.add(
+                        gfx.Points(
+                            geometry=gfx.Geometry(
+                                positions=np.array(
+                                    [[point[0], point[1], 1]], dtype=np.float32
+                                )
+                            ),
+                            material=gfx.PointsMarkerMaterial(
+                                marker="+",
+                                size=10,
+                                color="red",
+                            ),
+                        )
+                    )
+                    n_plotted += 1
+                    self.video2.render()
+
+        print("n_plotted:", n_plotted)
 
 
 if __name__ == "__main__":
