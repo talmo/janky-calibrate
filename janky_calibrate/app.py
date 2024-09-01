@@ -13,7 +13,71 @@ import numpy as np
 import sleap_io as sio
 import attrs
 import matplotlib.pyplot as plt
+import cv2
+from scipy.optimize import least_squares
 
+
+def project(points_3d, camera_matrix, rvec, tvec):
+    """Projects 3D points to 2D using the camera matrix, rotation vector, and translation vector."""
+    points_2d, _ = cv2.projectPoints(points_3d, rvec, tvec, camera_matrix, distCoeffs=None)
+    return points_2d.reshape(-1, 2)
+
+def reprojection_error(params, n_cameras, n_points, camera_indices, point_indices, points_2d, camera_matrix):
+    """Computes the reprojection error."""
+    rvecs = params[:n_cameras * 3].reshape((n_cameras, 3))
+    tvecs = params[n_cameras * 3:n_cameras * 6].reshape((n_cameras, 3))
+    points_3d = params[n_cameras * 6:].reshape((n_points, 3))
+
+    error = []
+    for i in range(points_2d.shape[0]):
+        camera_idx = camera_indices[i]
+        point_idx = point_indices[i]
+        projected_point = project(points_3d[point_idx], camera_matrix, rvecs[camera_idx], tvecs[camera_idx])
+        error.append(points_2d[i] - projected_point)
+    return np.concatenate(error)
+
+def bundle_adjustment(corresponding_points, camera_matrix):
+    """Performs bundle adjustment using CorrespondingPointSet."""
+    points_2d = []
+    camera_indices = []
+    point_indices = []
+    point_set_map = {}
+    point_counter = 0
+
+    for point_set in corresponding_points:
+        for video, point in point_set.video_points.items():
+            video_idx = corresponding_points[0].video_points.keys().index(video)
+            if (point_set.frame_idx, video_idx) not in point_set_map:
+                point_set_map[(point_set.frame_idx, video_idx)] = point_counter
+                point_counter += 1
+            points_2d.append(point)
+            camera_indices.append(video_idx)
+            point_indices.append(point_set_map[(point_set.frame_idx, video_idx)])
+
+    points_2d = np.array(points_2d, dtype=np.float32)
+    camera_indices = np.array(camera_indices, dtype=np.int32)
+    point_indices = np.array(point_indices, dtype=np.int32)
+    n_cameras = len(corresponding_points[0].video_points)
+    n_points = len(point_set_map)
+
+    # Initial estimates
+    rvecs = np.zeros((n_cameras, 3))
+    tvecs = np.zeros((n_cameras, 3))
+    points_3d = np.random.rand(n_points, 3)  # Random initial guess for 3D points
+
+    x0 = np.hstack((rvecs.ravel(), tvecs.ravel(), points_3d.ravel()))
+
+    res = least_squares(
+        reprojection_error, x0, verbose=2, x_scale='jac', ftol=1e-4, method='trf',
+        args=(n_cameras, n_points, camera_indices, point_indices, points_2d, camera_matrix)
+    )
+
+    optimized_params = res.x
+    rvecs = optimized_params[:n_cameras * 3].reshape((n_cameras, 3))
+    tvecs = optimized_params[n_cameras * 3:n_cameras * 6].reshape((n_cameras, 3))
+    points_3d = optimized_params[n_cameras * 6:].reshape((n_points, 3))
+
+    return rvecs, tvecs, points_3d
 
 
 class VideoPlayer(QWidget):
@@ -118,14 +182,16 @@ class CorrespondingPointSet:
     def __contains__(self, video: sio.Video):
         return video in self.video_points
     
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Janky Calibrate")
         
         self.video_paths = [
-            "tests/data/minimal_session/back/minimal_back.mp4",
-            "tests/data/minimal_session/side/minimal_side.mp4"
+            "tests/data/minimal_session/mid/minimal_mid.mp4",
+            "tests/data/minimal_session/top/minimal_top.mp4"
         ]
         self.videos = [sio.load_video(path) for path in self.video_paths]
         self.correspondences: list[CorrespondingPointSet] = []
